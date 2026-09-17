@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<body>
+    <video id="video" autoplay playsinline></video>
+    <button id="shot">撮影</button>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+
+        // カメラを起動する（ここでブラウザが許可を求める）
+        navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+            .then(stream => { video.srcObject = stream; })
+            .catch(err => alert('カメラを使えません: ' + err.name));
+
+        // 今の映像を静止画として保存する
+        document.getElementById('shot').onclick = () => {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            // 画像データが欲しいときは canvas.toDataURL('image/png')
+        };
+    </script>
+</body>
+
+</html>
