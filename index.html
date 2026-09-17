@@ -5,38 +5,67 @@
     <meta charset="UTF-8">
     <title>カメラ</title>
     <style>
-        /* 映像と検出結果を重ねて、鏡のように左右反転 */
-        #wrap { position: relative; width: 640px; max-width: 100%; transform: scaleX(-1); }
-        #video { display: block; width: 100%; }
+        html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
+        /* ウィンドウいっぱいに表示し、はみ出た映像は切り取る */
+        #stage { position: fixed; inset: 0; overflow: hidden; }
+        /* 映像と検出結果を重ねて、鏡のように左右反転（大きさと位置は JS で合わせる） */
+        #wrap { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) scaleX(-1); }
+        #video { display: block; width: 100%; height: 100%; }
         #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
-        #canvas { display: block; max-width: 640px; width: 100%; margin-top: 8px; }
+
+        /* 状態表示（画面の左下に重ねる） */
+        #status { position: fixed; left: 16px; bottom: 16px; z-index: 3; color: #fff; text-shadow: 0 0 3px #000; }
+
+        /* HPバー（反転しない） */
+        #hud { position: absolute; top: 16px; left: 16px; right: 16px; display: flex; gap: 32px; z-index: 1; font-size: 24px; }
+        .player { flex: 1; color: #fff; font-weight: bold; text-shadow: 0 0 3px #000; }
+        .player.p2 { text-align: right; }
+        .bar { height: 24px; margin-top: 4px; background: rgba(0, 0, 0, 0.5); border: 2px solid #fff; border-radius: 4px; overflow: hidden; }
+        .bar > div { height: 100%; width: 100%; transition: width 0.2s; }
+        .p1 .bar > div { background: #FF4D4D; }
+        .p2 .bar > div { background: #4DA6FF; margin-left: auto; }
+
+        /* 勝敗表示 */
+        #result { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px; background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 40px; font-weight: bold; z-index: 2; }
+        #result.show { display: flex; }
+        #result button { font-size: 20px; padding: 8px 24px; }
     </style>
 </head>
 
 <body>
-    <div id="wrap">
-        <video id="video" autoplay playsinline muted></video>
-        <canvas id="overlay"></canvas>
+    <div id="stage">
+        <div id="hud">
+            <div class="player p1">P1 <span id="hp1text"></span><div class="bar"><div id="hp1"></div></div></div>
+            <div class="player p2"><span id="hp2text"></span> P2<div class="bar"><div id="hp2"></div></div></div>
+        </div>
+        <div id="wrap">
+            <video id="video" autoplay playsinline muted></video>
+            <canvas id="overlay"></canvas>
+        </div>
+        <div id="result">
+            <div id="winner"></div>
+            <button id="restart">もう一度</button>
+        </div>
     </div>
-    <button id="shot">撮影</button>
-    <span id="status">モデルを読み込み中…</span>
-    <canvas id="canvas"></canvas>
+    <div id="status">モデルを読み込み中…</div>
 
     <script type="module">
         import {
-            FilesetResolver, FaceLandmarker, HandLandmarker, DrawingUtils
+            FilesetResolver, HandLandmarker, DrawingUtils
         } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
 
         const video = document.getElementById('video');
         const overlay = document.getElementById('overlay');
-        const canvas = document.getElementById('canvas');
         const status = document.getElementById('status');
         const octx = overlay.getContext('2d');
         const draw = new DrawingUtils(octx);
 
         // カメラを起動する（ここでブラウザが許可を求める）
         try {
-            video.srcObject = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            video.srcObject = await navigator.mediaDevices.getUserMedia({
+                video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                audio: false,
+            });
             await video.play();
         } catch (err) {
             status.textContent = 'カメラを使えません: ' + err.name;
@@ -45,32 +74,20 @@
         overlay.width = video.videoWidth;
         overlay.height = video.videoHeight;
 
-        // 今の映像を検出結果ごと静止画として保存する（画面と同じく左右反転）
-        document.getElementById('shot').onclick = () => {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            const ctx = canvas.getContext('2d');
-            ctx.save();
-            ctx.translate(canvas.width, 0);
-            ctx.scale(-1, 1);
-            ctx.drawImage(video, 0, 0);
-            ctx.drawImage(overlay, 0, 0);
-            ctx.restore();
-            // 画像データが欲しいときは canvas.toDataURL('image/png')
-        };
+        // 映像の縦横比を保ったまま、ウィンドウを隙間なく覆う大きさにする
+        const wrap = document.getElementById('wrap');
+        function fitToWindow() {
+            const scale = Math.max(innerWidth / video.videoWidth, innerHeight / video.videoHeight);
+            wrap.style.width = `${video.videoWidth * scale}px`;
+            wrap.style.height = `${video.videoHeight * scale}px`;
+        }
+        addEventListener('resize', fitToWindow);
+        fitToWindow();
 
-        // 顔・手の検出モデルを読み込む
+        // 手の検出モデルを読み込む
         const vision = await FilesetResolver.forVisionTasks(
             'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
         );
-        const face = await FaceLandmarker.createFromOptions(vision, {
-            baseOptions: {
-                modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
-                delegate: 'GPU',
-            },
-            runningMode: 'VIDEO',
-            numFaces: 1,
-        });
         const hand = await HandLandmarker.createFromOptions(vision, {
             baseOptions: {
                 modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
@@ -90,47 +107,99 @@
         // 指がまっすぐ伸びているか（付け根→第2関節 と 第2関節→指先 の曲がりが小さい）
         const isStraight = (p, mcp, pip, tip, maxBend) =>
             angle(sub(p[pip], p[mcp]), sub(p[tip], p[pip])) < maxBend;
-        // 指が折れているか（指先が第2関節より手首に近い）
-        const isFolded = (p, pip, tip) => dist(p[tip], p[0]) < dist(p[pip], p[0]);
+        // 指が折れているか（指先が第2関節と同じくらいか、より手首に近い）
+        const isFolded = (p, pip, tip) => dist(p[tip], p[0]) < dist(p[pip], p[0]) * 1.15;
+
+        // 判定のゆるさ（数値を大きくするほどゆるい）
+        const INDEX_BEND = 90;     // 人差し指の曲がりの許容（度）
+        const THUMB_BEND = 120;     // 親指の曲がりの許容（度）
+        const GUN_ANGLE = [30, 160]; // 構えとみなす親指と人差し指の角度（度）
+        const THUMB_IN = 0.9;      // 親指を倒したとみなす距離（手のひらの長さに対する割合）
+        const DISARM_GRACE = 500;  // 形が崩れても構えを保つ時間（ms）
 
         // 手の形を判定する
         // p は worldLandmarks（メートル単位の3D座標）なので、手の向きや距離に左右されにくい
-        //   gun:    L字（親指と人差し指だけを立て、その間がおよそ直角）
+        //   gun:    L字（親指と人差し指を立て、その間が開いている）
         //   hammer: 人差し指は立てたまま、親指を人差し指側に倒した状態
         function handPose(p) {
             const palm = dist(p[0], p[9]);
-            const indexUp = isStraight(p, 5, 6, 8, 30) && !isFolded(p, 6, 8);
-            const othersDown = isFolded(p, 10, 12) && isFolded(p, 14, 16) && isFolded(p, 18, 20);
+            const indexUp = isStraight(p, 5, 6, 8, INDEX_BEND) && dist(p[8], p[0]) > dist(p[6], p[0]);
+            // 中指・薬指・小指は3本中2本折れていればよい
+            const folded = [isFolded(p, 10, 12), isFolded(p, 14, 16), isFolded(p, 18, 20)].filter(Boolean).length;
+            const grip = indexUp && folded >= 2;
             const a = angle(sub(p[4], p[2]), sub(p[8], p[5]));
-            const thumbOut = isStraight(p, 2, 3, 4, 35) && dist(p[4], p[5]) > palm * 0.5;
-            const thumbIn = Math.min(dist(p[4], p[5]), dist(p[4], p[6])) < palm * 0.45 || a < 30;
-            const grip = indexUp && othersDown;
+            const thumbTip = Math.min(dist(p[4], p[5]), dist(p[4], p[6]));
+            const thumbOut = isStraight(p, 2, 3, 4, THUMB_BEND) && thumbTip > palm * 0.4;
+            const thumbIn = thumbTip < palm * THUMB_IN || a < GUN_ANGLE[0];
+            const gun = grip && thumbOut && a > GUN_ANGLE[0] && a < GUN_ANGLE[1];
             return {
                 grip,
-                gun: grip && thumbOut && a > 50 && a < 130,
-                hammer: grip && thumbIn,
+                gun,
+                // 発射時は人差し指さえ立っていればよい（撃つ瞬間に他の指が動いても可）
+                hammer: indexUp && thumbIn && !gun,
             };
         }
 
-        // 手ごとの状態（右手・左手で別々に構え→発射を追う）
-        const hands = new Map();   // key: 'Left' | 'Right' → { armed, lastShot }
-        const bullets = [];        // { x, y, vx, vy }（ピクセル, ピクセル/秒）
-        const flashes = [];        // { x, y, t }
-        const BULLET_SPEED = 1500;
+        // 対戦のルール
+        const MAX_HP = 100;
+        const DAMAGE = 20;         // 1発のダメージ（5発で倒れる）
+        const HIT_PAD = 20;        // 手の当たり判定を広げる量（ピクセル）
+        const BULLET_SPEED = overlay.width * 2.4; // ピクセル/秒（映像の幅に合わせる）
         const COOLDOWN = 250;      // ms
 
-        function fire(lm, now) {
+        // プレイヤー：画面の左半分にいる手が P1、右半分が P2
+        const COLORS = ['#FF4D4D', '#4DA6FF'];
+        const players = [0, 1].map(() => ({ hp: MAX_HP, armed: false, lastShot: 0, lastGrip: 0 }));
+        const bullets = [];        // { x, y, vx, vy, owner }（ピクセル, ピクセル/秒）
+        const flashes = [];        // { x, y, t }
+        const hits = [];           // { x, y, t }
+        let gameOver = false;
+
+        const hpBars = [document.getElementById('hp1'), document.getElementById('hp2')];
+        const hpTexts = [document.getElementById('hp1text'), document.getElementById('hp2text')];
+        const result = document.getElementById('result');
+
+        function updateHud() {
+            players.forEach((pl, i) => {
+                hpBars[i].style.width = `${pl.hp / MAX_HP * 100}%`;
+                hpTexts[i].textContent = `HP ${pl.hp}`;
+            });
+        }
+
+        function resetGame() {
+            for (const pl of players) Object.assign(pl, { hp: MAX_HP, armed: false });
+            bullets.length = 0;
+            gameOver = false;
+            result.classList.remove('show');
+            updateHud();
+        }
+        document.getElementById('restart').onclick = resetGame;
+        updateHud();
+
+        function fire(lm, owner, now) {
             // 人差し指の付け根→指先の向きに飛ばす
             const x = lm[8].x * overlay.width, y = lm[8].y * overlay.height;
             let dx = x - lm[5].x * overlay.width, dy = y - lm[5].y * overlay.height;
             const d = Math.hypot(dx, dy);
             if (d < 1) { dx = 0; dy = -1; } else { dx /= d; dy /= d; }
-            bullets.push({ x, y, vx: dx * BULLET_SPEED, vy: dy * BULLET_SPEED });
+            bullets.push({ x, y, vx: dx * BULLET_SPEED, vy: dy * BULLET_SPEED, owner });
             flashes.push({ x, y, t: now });
         }
 
+        function damage(target, x, y, now) {
+            const pl = players[target];
+            pl.hp = Math.max(0, pl.hp - DAMAGE);
+            hits.push({ x, y, t: now });
+            updateHud();
+            if (pl.hp === 0) {
+                gameOver = true;
+                document.getElementById('winner').textContent = `P${2 - target} の勝ち！`;
+                result.classList.add('show');
+            }
+        }
+
         // 反転表示でも文字が読めるように、左右反転して書く
-        function drawLabel(text, x, y) {
+        function drawLabel(text, x, y, color = '#FFD600') {
             octx.save();
             octx.translate(x, y);
             octx.scale(-1, 1);
@@ -139,7 +208,7 @@
             octx.lineWidth = 5;
             octx.strokeStyle = '#000';
             octx.strokeText(text, 0, 0);
-            octx.fillStyle = '#FFD600';
+            octx.fillStyle = color;
             octx.fillText(text, 0, 0);
             octx.restore();
         }
@@ -147,46 +216,63 @@
         // 検出は新しい映像フレームが来たときだけ、弾の動きと描画は毎フレーム行う
         let lastTime = -1;
         let prevNow = performance.now();
-        let faceResult = { faceLandmarks: [] };
-        let handViews = [];        // { lm, armed }
-        let shotCount = 0;
+        let handViews = [];        // { lm, player, armed, box }
 
         function detect(now) {
-            faceResult = face.detectForVideo(video, now);
             const h = hand.detectForVideo(video, now);
             const seen = new Set();
-            handViews = h.landmarks.map((lm, i) => {
-                const key = h.handedness[i][0].categoryName;
-                seen.add(key);
-                const s = hands.get(key) ?? { armed: false, lastShot: 0 };
-                hands.set(key, s);
+            handViews = [];
+            h.landmarks.forEach((lm, i) => {
+                // 映像は反転表示なので、元の x が大きい（右側）ほど画面では左 → P1
+                const player = lm[9].x > 0.5 ? 0 : 1;
+                if (seen.has(player)) return;       // 同じ側の2本目の手は無視
+                seen.add(player);
+                const s = players[player];
                 const pose = handPose(h.worldLandmarks[i]);
+                if (pose.grip || pose.gun) s.lastGrip = now;
 
                 if (pose.gun) {
                     s.armed = true;                         // 構えた
                 } else if (s.armed && pose.hammer && now - s.lastShot > COOLDOWN) {
-                    fire(lm, now);                          // 親指を閉じた → 発射
-                    shotCount++;
+                    if (!gameOver) fire(lm, player, now);   // 親指を閉じた → 発射
                     s.armed = false;
                     s.lastShot = now;
-                } else if (!pose.grip) {
-                    s.armed = false;                        // 銃の形が崩れたら解除
+                } else if (now - s.lastGrip > DISARM_GRACE) {
+                    s.armed = false;                        // 銃の形がしばらく崩れたら解除
                 }
-                return { lm, armed: s.armed };
+
+                // 当たり判定用の手の範囲（ピクセル）
+                const xs = lm.map(p => p.x * overlay.width), ys = lm.map(p => p.y * overlay.height);
+                const box = {
+                    x0: Math.min(...xs) - HIT_PAD, x1: Math.max(...xs) + HIT_PAD,
+                    y0: Math.min(...ys) - HIT_PAD, y1: Math.max(...ys) + HIT_PAD,
+                };
+                handViews.push({ lm, player, armed: s.armed, box });
             });
-            // 見えなくなった手の構えは解除
-            for (const [key, s] of hands) if (!seen.has(key)) s.armed = false;
+            // 見えなくなった手も、少しの間は構えを保つ
+            players.forEach((s, i) => {
+                if (!seen.has(i) && now - s.lastGrip > DISARM_GRACE) s.armed = false;
+            });
         }
 
         function render(now, dt) {
-            octx.clearRect(0, 0, overlay.width, overlay.height);
-            for (const lm of faceResult.faceLandmarks) {
-                draw.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_TESSELATION, { color: '#00FF0060', lineWidth: 1 });
-            }
-            for (const { lm, armed } of handViews) {
-                draw.drawConnectors(lm, HandLandmarker.HAND_CONNECTIONS, { color: armed ? '#FFD600' : '#00CCFF', lineWidth: 3 });
-                draw.drawLandmarks(lm, { color: '#FF3366', radius: 3 });
-                if (armed) drawLabel('構え', lm[0].x * overlay.width, lm[0].y * overlay.height + 40);
+            const W = overlay.width, H = overlay.height;
+            octx.clearRect(0, 0, W, H);
+
+            // 陣地の境界線
+            octx.strokeStyle = 'rgba(255,255,255,0.4)';
+            octx.lineWidth = 2;
+            octx.setLineDash([10, 10]);
+            octx.beginPath();
+            octx.moveTo(W / 2, 0);
+            octx.lineTo(W / 2, H);
+            octx.stroke();
+            octx.setLineDash([]);
+
+            for (const { lm, player, armed } of handViews) {
+                draw.drawConnectors(lm, HandLandmarker.HAND_CONNECTIONS, { color: armed ? '#FFD600' : COLORS[player], lineWidth: 3 });
+                draw.drawLandmarks(lm, { color: COLORS[player], radius: 3 });
+                if (armed) drawLabel('構え', lm[0].x * W, lm[0].y * H + 40);
             }
 
             // マズルフラッシュ（150msで消える）
@@ -203,16 +289,23 @@
                 octx.fill();
             }
 
-            // 弾丸（尾を引いて飛び、画面外に出たら消える）
+            // 弾丸（尾を引いて飛び、相手の手に当たるか画面外に出たら消える）
             for (let i = bullets.length - 1; i >= 0; i--) {
                 const b = bullets[i];
                 b.x += b.vx * dt;
                 b.y += b.vy * dt;
-                if (b.x < -50 || b.y < -50 || b.x > overlay.width + 50 || b.y > overlay.height + 50) {
+                if (b.x < -50 || b.y < -50 || b.x > W + 50 || b.y > H + 50) {
                     bullets.splice(i, 1);
                     continue;
                 }
-                octx.strokeStyle = 'rgba(255,200,0,0.6)';
+                const target = handViews.find(v => v.player !== b.owner &&
+                    b.x > v.box.x0 && b.x < v.box.x1 && b.y > v.box.y0 && b.y < v.box.y1);
+                if (target && !gameOver) {
+                    damage(target.player, b.x, b.y, now);
+                    bullets.splice(i, 1);
+                    continue;
+                }
+                octx.strokeStyle = COLORS[b.owner] + '99';
                 octx.lineWidth = 4;
                 octx.beginPath();
                 octx.moveTo(b.x, b.y);
@@ -223,6 +316,17 @@
                 octx.arc(b.x, b.y, 6, 0, Math.PI * 2);
                 octx.fill();
             }
+
+            // 被弾エフェクト（赤い爆発とダメージ表示、400msで消える）
+            for (let i = hits.length - 1; i >= 0; i--) {
+                const k = (now - hits[i].t) / 400;
+                if (k >= 1) { hits.splice(i, 1); continue; }
+                octx.fillStyle = `rgba(255,40,40,${0.6 * (1 - k)})`;
+                octx.beginPath();
+                octx.arc(hits[i].x, hits[i].y, 20 + 60 * k, 0, Math.PI * 2);
+                octx.fill();
+                drawLabel(`-${DAMAGE}`, hits[i].x, hits[i].y - 30 - 40 * k, '#FF4040');
+            }
         }
 
         function loop() {
@@ -232,7 +336,7 @@
             if (video.currentTime !== lastTime) {
                 lastTime = video.currentTime;
                 detect(now);
-                status.textContent = `顔: ${faceResult.faceLandmarks.length} / 手: ${handViews.length} / 発射: ${shotCount}`;
+                status.textContent = `手: ${handViews.length}`;
             }
             render(now, dt);
             requestAnimationFrame(loop);
