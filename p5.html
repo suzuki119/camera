@@ -63,7 +63,8 @@
         function judgePose(h) {
             const p = h.keypoints3D.map(k => createVector(k.x, k.y, k.z));
             const d = (a, b) => p5.Vector.dist(p[a], p[b]);
-            const ang = (a, b, c, e) => p5.Vector.sub(p[b], p[a]).angleBetween(p5.Vector.sub(p[e], p[c]));
+            // angleBetween は外積の向きでマイナスになる（手の向きで符号が変わる）ので絶対値にする
+            const ang = (a, b, c, e) => abs(p5.Vector.sub(p[b], p[a]).angleBetween(p5.Vector.sub(p[e], p[c])));
             const bend = (a, b, c) => ang(a, b, b, c);                  // 関節 b での曲がり
             const folded = (pip, tip) => d(tip, 0) < d(pip, 0) * 1.15;  // 指先が第2関節と同じくらいか、より手首に近い
 
