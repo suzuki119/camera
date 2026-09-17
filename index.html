@@ -1,27 +1,243 @@
 <!DOCTYPE html>
 <html lang="ja">
 
+<head>
+    <meta charset="UTF-8">
+    <title>カメラ</title>
+    <style>
+        /* 映像と検出結果を重ねて、鏡のように左右反転 */
+        #wrap { position: relative; width: 640px; max-width: 100%; transform: scaleX(-1); }
+        #video { display: block; width: 100%; }
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #canvas { display: block; max-width: 640px; width: 100%; margin-top: 8px; }
+    </style>
+</head>
+
 <body>
-    <video id="video" autoplay playsinline></video>
+    <div id="wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+    </div>
     <button id="shot">撮影</button>
+    <span id="status">モデルを読み込み中…</span>
     <canvas id="canvas"></canvas>
 
-    <script>
+    <script type="module">
+        import {
+            FilesetResolver, FaceLandmarker, HandLandmarker, DrawingUtils
+        } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+
         const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
         const canvas = document.getElementById('canvas');
+        const status = document.getElementById('status');
+        const octx = overlay.getContext('2d');
+        const draw = new DrawingUtils(octx);
 
         // カメラを起動する（ここでブラウザが許可を求める）
-        navigator.mediaDevices.getUserMedia({ video: true, audio: false })
-            .then(stream => { video.srcObject = stream; })
-            .catch(err => alert('カメラを使えません: ' + err.name));
+        try {
+            video.srcObject = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            await video.play();
+        } catch (err) {
+            status.textContent = 'カメラを使えません: ' + err.name;
+            throw err;
+        }
+        overlay.width = video.videoWidth;
+        overlay.height = video.videoHeight;
 
-        // 今の映像を静止画として保存する
+        // 今の映像を検出結果ごと静止画として保存する（画面と同じく左右反転）
         document.getElementById('shot').onclick = () => {
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
-            canvas.getContext('2d').drawImage(video, 0, 0);
+            const ctx = canvas.getContext('2d');
+            ctx.save();
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
+            ctx.drawImage(video, 0, 0);
+            ctx.drawImage(overlay, 0, 0);
+            ctx.restore();
             // 画像データが欲しいときは canvas.toDataURL('image/png')
         };
+
+        // 顔・手の検出モデルを読み込む
+        const vision = await FilesetResolver.forVisionTasks(
+            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
+        );
+        const face = await FaceLandmarker.createFromOptions(vision, {
+            baseOptions: {
+                modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+                delegate: 'GPU',
+            },
+            runningMode: 'VIDEO',
+            numFaces: 1,
+        });
+        const hand = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+                modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+                delegate: 'GPU',
+            },
+            runningMode: 'VIDEO',
+            numHands: 2,
+        });
+
+        // 3D座標のベクトル計算
+        const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
+        const len = (v) => Math.hypot(v.x, v.y, v.z);
+        const dist = (a, b) => len(sub(a, b));
+        const angle = (u, v) => Math.acos(Math.min(1, Math.max(-1,
+            (u.x * v.x + u.y * v.y + u.z * v.z) / (len(u) * len(v))))) * 180 / Math.PI;
+
+        // 指がまっすぐ伸びているか（付け根→第2関節 と 第2関節→指先 の曲がりが小さい）
+        const isStraight = (p, mcp, pip, tip, maxBend) =>
+            angle(sub(p[pip], p[mcp]), sub(p[tip], p[pip])) < maxBend;
+        // 指が折れているか（指先が第2関節より手首に近い）
+        const isFolded = (p, pip, tip) => dist(p[tip], p[0]) < dist(p[pip], p[0]);
+
+        // 手の形を判定する
+        // p は worldLandmarks（メートル単位の3D座標）なので、手の向きや距離に左右されにくい
+        //   gun:    L字（親指と人差し指だけを立て、その間がおよそ直角）
+        //   hammer: 人差し指は立てたまま、親指を人差し指側に倒した状態
+        function handPose(p) {
+            const palm = dist(p[0], p[9]);
+            const indexUp = isStraight(p, 5, 6, 8, 30) && !isFolded(p, 6, 8);
+            const othersDown = isFolded(p, 10, 12) && isFolded(p, 14, 16) && isFolded(p, 18, 20);
+            const a = angle(sub(p[4], p[2]), sub(p[8], p[5]));
+            const thumbOut = isStraight(p, 2, 3, 4, 35) && dist(p[4], p[5]) > palm * 0.5;
+            const thumbIn = Math.min(dist(p[4], p[5]), dist(p[4], p[6])) < palm * 0.45 || a < 30;
+            const grip = indexUp && othersDown;
+            return {
+                grip,
+                gun: grip && thumbOut && a > 50 && a < 130,
+                hammer: grip && thumbIn,
+            };
+        }
+
+        // 手ごとの状態（右手・左手で別々に構え→発射を追う）
+        const hands = new Map();   // key: 'Left' | 'Right' → { armed, lastShot }
+        const bullets = [];        // { x, y, vx, vy }（ピクセル, ピクセル/秒）
+        const flashes = [];        // { x, y, t }
+        const BULLET_SPEED = 1500;
+        const COOLDOWN = 250;      // ms
+
+        function fire(lm, now) {
+            // 人差し指の付け根→指先の向きに飛ばす
+            const x = lm[8].x * overlay.width, y = lm[8].y * overlay.height;
+            let dx = x - lm[5].x * overlay.width, dy = y - lm[5].y * overlay.height;
+            const d = Math.hypot(dx, dy);
+            if (d < 1) { dx = 0; dy = -1; } else { dx /= d; dy /= d; }
+            bullets.push({ x, y, vx: dx * BULLET_SPEED, vy: dy * BULLET_SPEED });
+            flashes.push({ x, y, t: now });
+        }
+
+        // 反転表示でも文字が読めるように、左右反転して書く
+        function drawLabel(text, x, y) {
+            octx.save();
+            octx.translate(x, y);
+            octx.scale(-1, 1);
+            octx.font = 'bold 32px sans-serif';
+            octx.textAlign = 'center';
+            octx.lineWidth = 5;
+            octx.strokeStyle = '#000';
+            octx.strokeText(text, 0, 0);
+            octx.fillStyle = '#FFD600';
+            octx.fillText(text, 0, 0);
+            octx.restore();
+        }
+
+        // 検出は新しい映像フレームが来たときだけ、弾の動きと描画は毎フレーム行う
+        let lastTime = -1;
+        let prevNow = performance.now();
+        let faceResult = { faceLandmarks: [] };
+        let handViews = [];        // { lm, armed }
+        let shotCount = 0;
+
+        function detect(now) {
+            faceResult = face.detectForVideo(video, now);
+            const h = hand.detectForVideo(video, now);
+            const seen = new Set();
+            handViews = h.landmarks.map((lm, i) => {
+                const key = h.handedness[i][0].categoryName;
+                seen.add(key);
+                const s = hands.get(key) ?? { armed: false, lastShot: 0 };
+                hands.set(key, s);
+                const pose = handPose(h.worldLandmarks[i]);
+
+                if (pose.gun) {
+                    s.armed = true;                         // 構えた
+                } else if (s.armed && pose.hammer && now - s.lastShot > COOLDOWN) {
+                    fire(lm, now);                          // 親指を閉じた → 発射
+                    shotCount++;
+                    s.armed = false;
+                    s.lastShot = now;
+                } else if (!pose.grip) {
+                    s.armed = false;                        // 銃の形が崩れたら解除
+                }
+                return { lm, armed: s.armed };
+            });
+            // 見えなくなった手の構えは解除
+            for (const [key, s] of hands) if (!seen.has(key)) s.armed = false;
+        }
+
+        function render(now, dt) {
+            octx.clearRect(0, 0, overlay.width, overlay.height);
+            for (const lm of faceResult.faceLandmarks) {
+                draw.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_TESSELATION, { color: '#00FF0060', lineWidth: 1 });
+            }
+            for (const { lm, armed } of handViews) {
+                draw.drawConnectors(lm, HandLandmarker.HAND_CONNECTIONS, { color: armed ? '#FFD600' : '#00CCFF', lineWidth: 3 });
+                draw.drawLandmarks(lm, { color: '#FF3366', radius: 3 });
+                if (armed) drawLabel('構え', lm[0].x * overlay.width, lm[0].y * overlay.height + 40);
+            }
+
+            // マズルフラッシュ（150msで消える）
+            for (let i = flashes.length - 1; i >= 0; i--) {
+                const k = (now - flashes[i].t) / 150;
+                if (k >= 1) { flashes.splice(i, 1); continue; }
+                const g = octx.createRadialGradient(flashes[i].x, flashes[i].y, 0, flashes[i].x, flashes[i].y, 50 * (1 + k));
+                g.addColorStop(0, `rgba(255,255,220,${1 - k})`);
+                g.addColorStop(0.4, `rgba(255,180,0,${0.8 * (1 - k)})`);
+                g.addColorStop(1, 'rgba(255,80,0,0)');
+                octx.fillStyle = g;
+                octx.beginPath();
+                octx.arc(flashes[i].x, flashes[i].y, 50 * (1 + k), 0, Math.PI * 2);
+                octx.fill();
+            }
+
+            // 弾丸（尾を引いて飛び、画面外に出たら消える）
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                const b = bullets[i];
+                b.x += b.vx * dt;
+                b.y += b.vy * dt;
+                if (b.x < -50 || b.y < -50 || b.x > overlay.width + 50 || b.y > overlay.height + 50) {
+                    bullets.splice(i, 1);
+                    continue;
+                }
+                octx.strokeStyle = 'rgba(255,200,0,0.6)';
+                octx.lineWidth = 4;
+                octx.beginPath();
+                octx.moveTo(b.x, b.y);
+                octx.lineTo(b.x - b.vx * 0.05, b.y - b.vy * 0.05);
+                octx.stroke();
+                octx.fillStyle = '#FFF3B0';
+                octx.beginPath();
+                octx.arc(b.x, b.y, 6, 0, Math.PI * 2);
+                octx.fill();
+            }
+        }
+
+        function loop() {
+            const now = performance.now();
+            const dt = Math.min(0.1, (now - prevNow) / 1000);
+            prevNow = now;
+            if (video.currentTime !== lastTime) {
+                lastTime = video.currentTime;
+                detect(now);
+                status.textContent = `顔: ${faceResult.faceLandmarks.length} / 手: ${handViews.length} / 発射: ${shotCount}`;
+            }
+            render(now, dt);
+            requestAnimationFrame(loop);
+        }
+        loop();
     </script>
 </body>
 
