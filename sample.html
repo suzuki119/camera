@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>手の21点の番号</title>
+    <style>
+        html, body { margin: 0; overflow: hidden; background: #000; }
+    </style>
+    <!-- p5.js 2.x は preload が無く ml5 の読み込み方と合わないので 1.x に固定 -->
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.11.13/lib/p5.min.js"></script>
+    <script src="https://unpkg.com/ml5@1.4.0/dist/ml5.min.js"></script>
+</head>
+
+<body>
+    <script>
+        // =============================================================
+        //  手の21点（0〜20）の番号を、カメラ映像の上に表示する
+        //
+        //   0 = 手首、1〜4 = 親指、5〜8 = 人差し指、9〜12 = 中指、
+        //   13〜16 = 薬指、17〜20 = 小指（各指は 付け根 → 指先 の順）
+        // =============================================================
+
+        // 指ごとの色。番号の色で、どの指の点かわかるようにする
+        const FINGER_COLORS = [
+            '#FFFFFF',   // 手首
+            '#FF4D4D',   // 親指
+            '#FFB000',   // 人差し指
+            '#4DFF88',   // 中指
+            '#4DA6FF',   // 薬指
+            '#C77DFF',   // 小指
+        ];
+
+        let video;
+        let handPose;
+        let detectedHands = [];   // gotHands() が書き込み、draw() が読む
+
+        function preload() {
+            // flipped: true は、下の createCapture の反転と揃える
+            handPose = ml5.handPose({ maxHands: 2, flipped: true });
+        }
+
+        function setup() {
+            createCanvas(windowWidth, windowHeight);
+            video = createCapture({ video: { width: 1280, height: 720 }, audio: false }, { flipped: true });
+            video.hide();
+            handPose.detectStart(video, gotHands);
+        }
+
+        function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+
+        function gotHands(results) {
+            detectedHands = results;
+        }
+
+        // 点の番号から指の色を決める（0 は手首、1〜4 は親指、5〜8 は人差し指…）
+        function fingerColor(index) {
+            return FINGER_COLORS[index === 0 ? 0 : ceil(index / 4)];
+        }
+
+        function draw() {
+            background(0);
+
+            const videoW = video.elt.videoWidth, videoH = video.elt.videoHeight;
+            if (!videoW) return;   // カメラの準備待ち
+
+            // 映像の座標のまま描けるように、画面いっぱいに拡大する
+            const zoom = max(width / videoW, height / videoH);
+            push();
+            translate((width - videoW * zoom) / 2, (height - videoH * zoom) / 2);
+            scale(zoom);
+            image(video, 0, 0, videoW, videoH);
+
+            for (const hand of detectedHands) {
+                // 骨格の線
+                stroke(255, 150);
+                strokeWeight(2);
+                for (const [from, to] of handPose.getConnections()) {
+                    line(hand.keypoints[from].x, hand.keypoints[from].y, hand.keypoints[to].x, hand.keypoints[to].y);
+                }
+
+                // 点と番号
+                hand.keypoints.forEach((kp, index) => {
+                    const color = fingerColor(index);
+                    noStroke();
+                    fill(color);
+                    circle(kp.x, kp.y, 10);
+
+                    // 黒い縁取りで、映像の上でも読めるようにする
+                    textSize(20);
+                    textStyle(BOLD);
+                    textAlign(LEFT, BOTTOM);
+                    stroke(0);
+                    strokeWeight(4);
+                    fill(color);
+                    text(index, kp.x + 6, kp.y - 4);
+                });
+
+                // 手首の下に、右手か左手かを表示する
+                noStroke();
+                fill(255);
+                textSize(18);
+                textAlign(CENTER, TOP);
+                text(hand.handedness, hand.wrist.x, hand.wrist.y + 16);
+            }
+            pop();
+
+            drawLegend();
+        }
+
+        // 左上に、色と指の対応表を出す
+        function drawLegend() {
+            const names = ['0 手首', '1-4 親指', '5-8 人差し指', '9-12 中指', '13-16 薬指', '17-20 小指'];
+            noStroke();
+            fill(0, 160);
+            rect(12, 12, 170, (names.length + 1) * 26 + 12, 6);
+            textSize(16);
+            textStyle(BOLD);
+            textAlign(LEFT, TOP);
+            names.forEach((name, i) => {
+                fill(FINGER_COLORS[i]);
+                text(name, 24, 22 + i * 26);
+            });
+            fill(255);
+            text(`手: ${detectedHands.length}`, 24, 22 + names.length * 26);
+        }
+    </script>
+</body>
+
+</html>

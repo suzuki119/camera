@@ -47,7 +47,7 @@ let video;      // p5.js のカメラ映像（p5.Element）
 let handPose;   // ml5.js の手の検出モデル
 
 // 今フレームで見えている手。gotHands() が書き込み、draw() が読む
-//   { h: ml5 の検出結果, side: 0 = P1 / 1 = P2 }
+//   { hand: ml5 の検出結果, side: 0 = P1 / 1 = P2 }
 let hands = [];
 
 let players;    // プレイヤー2人の状態（HP、構え中かなど）
@@ -132,55 +132,55 @@ function resetGame() {
 //   grip   … 銃のグリップの形（人差し指が立ち、他の指が折れている）
 //   gun    … L字の構え（グリップ＋親指が開いている）
 //   hammer … 引き金を引いた形（人差し指は立てたまま、親指を倒した）
-function judgePose(h) {
-    // 21点を p5.Vector の配列にする。p[8] のように番号で取り出せる
-    const p = h.keypoints3D.map(k => createVector(k.x, k.y, k.z));
+function judgePose(hand) {
+    // 21点を p5.Vector の配列にする。points[8] のように番号で取り出せる
+    const points = hand.keypoints3D.map(kp => createVector(kp.x, kp.y, kp.z));
 
     // --- 計算を短く書くための小さな関数 ---
 
-    // 2点間の距離。引数は点の番号（例：d(0, 9) は手首から中指の付け根まで）
-    const d = (from, to) => p5.Vector.dist(p[from], p[to]);
+    // 2点間の距離。引数は点の番号（例：distance(0, 9) は手首から中指の付け根まで）
+    const distance = (from, to) => p5.Vector.dist(points[from], points[to]);
 
     // 「点1→点2 の向き」と「点3→点4 の向き」がなす角（度）
-    // 例：ang(2, 4, 5, 8) は、親指の向きと人差し指の向きの角度
+    // 例：angleBetween(2, 4, 5, 8) は、親指の向きと人差し指の向きの角度
     //
     // ⚠️ p5.js の angleBetween() は、3Dのベクトルだと外積の向きでマイナスの値を返す。
     //    符号は手の向き（右を指すか左を指すか）で変わるため、絶対値を取らないと
     //    片方の向きだけ判定に失敗する（実際にこのバグで、青側だけ撃てなかった）
-    const ang = (p1, p2, p3, p4) => abs(p5.Vector.sub(p[p2], p[p1]).angleBetween(p5.Vector.sub(p[p4], p[p3])));
+    const angleBetween = (p1, p2, p3, p4) => abs(p5.Vector.sub(points[p2], points[p1]).angleBetween(p5.Vector.sub(points[p4], points[p3])));
 
     // 第2関節（pip）での曲がり具合（度）。0°ならまっすぐ、90°なら直角に曲がっている
     // 「付け根→第2関節」と「第2関節→指先」の向きのズレを見ている
-    const bend = (mcp, pip, tip) => ang(mcp, pip, pip, tip);
+    const bendAngle = (mcp, pip, tip) => angleBetween(mcp, pip, pip, tip);
 
     // 指が折れているか。指先が第2関節と同じくらいか、より手首に近ければ折れている
     // （指を曲げると、指先は手のひら側に戻ってきて手首に近づく）
-    const folded = (pip, tip) => d(tip, 0) < d(pip, 0) * 1.15;
+    const isFolded = (pip, tip) => distance(tip, 0) < distance(pip, 0) * 1.15;
 
     // --- ここから実際の判定 ---
 
     // 手のひらの長さ（手首→中指の付け根）。これを「1」として他の距離を測る。
     // 手の大きさやカメラからの距離が違っても、同じ基準で判定するための工夫
-    const palm = d(0, 9);
+    const palmLength = distance(0, 9);
 
     // 人差し指が立っているか：曲がりが小さく、かつ指先が第2関節より手首から遠い
-    const indexUp = bend(5, 6, 8) < INDEX_BEND && d(8, 0) > d(6, 0);
+    const indexUp = bendAngle(5, 6, 8) < INDEX_BEND && distance(8, 0) > distance(6, 0);
 
     // 銃のグリップ：人差し指が立ち、中指・薬指・小指が3本中2本以上折れている
     // （3本すべてを求めると厳しすぎるので、2本で判定をゆるくしている）
-    const grip = indexUp && [folded(10, 12), folded(14, 16), folded(18, 20)].filter(Boolean).length >= 2;
+    const grip = indexUp && [isFolded(10, 12), isFolded(14, 16), isFolded(18, 20)].filter(Boolean).length >= 2;
 
     // 親指の向き（2→4）と人差し指の向き（5→8）のなす角。L字なら90°前後になる
-    const thumbAngle = ang(2, 4, 5, 8);
+    const thumbAngle = angleBetween(2, 4, 5, 8);
 
     // 親指の先が、人差し指の付け根・第2関節のどちらか近い方までの距離
-    const thumbTip = min(d(4, 5), d(4, 6));
+    const thumbToIndex = min(distance(4, 5), distance(4, 6));
 
     // 親指が開いているか：親指がまっすぐで、人差し指から十分離れている
-    const thumbOut = bend(2, 3, 4) < THUMB_BEND && thumbTip > palm * 0.4;
+    const thumbOut = bendAngle(2, 3, 4) < THUMB_BEND && thumbToIndex > palmLength * 0.4;
 
     // 親指が倒れているか：人差し指に近い、または角度がほとんど無い
-    const thumbIn = thumbTip < palm * THUMB_IN || thumbAngle < GUN_ANGLE[0];
+    const thumbIn = thumbToIndex < palmLength * THUMB_IN || thumbAngle < GUN_ANGLE[0];
 
     // 構え（L字）の完成形
     const gun = grip && thumbOut && thumbAngle > GUN_ANGLE[0] && thumbAngle < GUN_ANGLE[1];
@@ -213,39 +213,39 @@ function gotHands(results) {
     const now = millis();   // プログラム開始からの経過時間（ms）
     hands = [];
 
-    for (const h of results) {
+    for (const hand of results) {
         // どちらのプレイヤーの手か、手の位置で決める。
         // 映像は反転済みなので、座標がそのまま画面の見た目と一致する
-        const side = h.middle_finger_mcp.x < video.elt.videoWidth / 2 ? 0 : 1;
+        const side = hand.middle_finger_mcp.x < video.elt.videoWidth / 2 ? 0 : 1;
 
         // 同じ側で2本目の手は無視する（1人1本の手で遊ぶため）
-        if (hands.some(v => v.side === side)) continue;
-        hands.push({ h, side });   // draw() がこれを見て骨格を描く
+        if (hands.some(seen => seen.side === side)) continue;
+        hands.push({ hand, side });   // draw() がこれを見て骨格を描く
 
-        const s = players[side];
-        const pose = judgePose(h);
+        const player = players[side];
+        const pose = judgePose(hand);
 
         // 銃の形だった時刻を覚えておく（構えを解除するか判断するため）
-        if (pose.grip || pose.gun) s.lastGrip = now;
+        if (pose.grip || pose.gun) player.lastGrip = now;
 
         if (pose.gun) {
             // 構えた
-            s.armed = true;
-        } else if (s.armed && pose.hammer && now - s.lastShot > COOLDOWN) {
+            player.armed = true;
+        } else if (player.armed && pose.hammer && now - player.lastShot > COOLDOWN) {
             // 構えている状態から親指を倒した → 発射
-            if (!winner) fire(h, side);
-            s.armed = false;
-            s.lastShot = now;
-        } else if (now - s.lastGrip > DISARM_GRACE) {
+            if (!winner) fire(hand, side);
+            player.armed = false;
+            player.lastShot = now;
+        } else if (now - player.lastGrip > DISARM_GRACE) {
             // 銃の形がしばらく崩れていたら、構えを解除する。
             // すぐに解除しないのは、検出が一瞬ぶれただけで構えが消えるのを防ぐため
-            s.armed = false;
+            player.armed = false;
         }
     }
 
     // 手が画面から消えた場合も、少しの間は構えを保つ
-    players.forEach((s, i) => {
-        if (!hands.some(v => v.side === i) && now - s.lastGrip > DISARM_GRACE) s.armed = false;
+    players.forEach((player, side) => {
+        if (!hands.some(seen => seen.side === side) && now - player.lastGrip > DISARM_GRACE) player.armed = false;
     });
 }
 
@@ -255,41 +255,41 @@ function gotHands(results) {
 // =============================================================
 
 // 弾を1発作る。座標は映像のピクセル座標（keypoints の方）を使う
-function fire(h, owner) {
+function fire(hand, owner) {
     // 弾の出る位置は人差し指の先
-    const pos = createVector(h.index_finger_tip.x, h.index_finger_tip.y);
+    const position = createVector(hand.index_finger_tip.x, hand.index_finger_tip.y);
 
     // 飛ぶ向きは「人差し指の付け根 → 指先」。指の指す方向になる
     // p5.Vector.sub(a, b) は a - b を新しいベクトルとして返す（a と b は変わらない）
-    const vel = p5.Vector.sub(pos, createVector(h.index_finger_mcp.x, h.index_finger_mcp.y));
+    const velocity = p5.Vector.sub(position, createVector(hand.index_finger_mcp.x, hand.index_finger_mcp.y));
 
     // 指を真正面（カメラ方向）に向けると、画面上の長さが 0 になることがある。その場合は上向きにする
-    if (vel.mag() === 0) vel.set(0, -1);
+    if (velocity.mag() === 0) velocity.set(0, -1);
 
     // 向きはそのままで、長さ（＝速さ）を設定する。単位はピクセル/秒。
     // 映像の幅に比例させているので、カメラの解像度が変わっても見た目の速さは同じ
-    vel.setMag(video.elt.videoWidth * 2.4);
+    velocity.setMag(video.elt.videoWidth * 2.4);
 
-    bullets.push({ pos, vel, owner });
-    effects.push({ type: 'flash', pos: pos.copy(), t: millis() });   // 銃口の光
+    bullets.push({ position, velocity, owner });
+    effects.push({ type: 'flash', position: position.copy(), startTime: millis() });   // 銃口の光
 }
 
 // ダメージを与える
-function damage(side, pos) {
-    const pl = players[side];
-    pl.hp = max(0, pl.hp - DAMAGE);      // マイナスにならないように max で止める
-    effects.push({ type: 'hit', pos: pos.copy(), t: millis() });
+function damage(side, hitPosition) {
+    const player = players[side];
+    player.hp = max(0, player.hp - DAMAGE);      // マイナスにならないように max で止める
+    effects.push({ type: 'hit', position: hitPosition.copy(), startTime: millis() });
     // side が 0（P1）なら勝者は P2、1（P2）なら P1 になる
-    if (pl.hp === 0) winner = `P${2 - side} の勝ち！`;
+    if (player.hp === 0) winner = `P${2 - side} の勝ち！`;
 }
 
 // 弾が手に当たったか。
 // 手の21点を囲む四角形を HIT_PAD だけ広げ、その中に弾があれば命中とする。
 // 「バウンディングボックス（外接矩形）」と呼ばれる、一番単純な当たり判定
-function inHand(h, pos) {
-    const xs = h.keypoints.map(k => k.x), ys = h.keypoints.map(k => k.y);
-    return pos.x > min(xs) - HIT_PAD && pos.x < max(xs) + HIT_PAD &&
-        pos.y > min(ys) - HIT_PAD && pos.y < max(ys) + HIT_PAD;
+function inHand(hand, position) {
+    const xs = hand.keypoints.map(kp => kp.x), ys = hand.keypoints.map(kp => kp.y);
+    return position.x > min(xs) - HIT_PAD && position.x < max(xs) + HIT_PAD &&
+        position.y > min(ys) - HIT_PAD && position.y < max(ys) + HIT_PAD;
 }
 
 
@@ -298,13 +298,13 @@ function inHand(h, pos) {
 // =============================================================
 
 // 黒い縁取りのついた文字を描く（映像の上でも読めるように）
-function label(txt, x, y, c) {
+function label(message, x, y, textColor) {
     textSize(32);
     textAlign(CENTER, BASELINE);
     stroke(0);          // 縁取りの色
     strokeWeight(5);    // 縁取りの太さ
-    fill(c);            // 文字の色
-    text(txt, x, y);
+    fill(textColor);    // 文字の色
+    text(message, x, y);
 }
 
 // p5.js が画面の更新ごとに呼ぶ（約60回/秒）
@@ -313,19 +313,19 @@ function draw() {
 
     // video.elt は、p5.js が包んでいる元の <video> 要素。
     // videoWidth はカメラの実際の解像度で、準備ができるまでは 0
-    const vw = video.elt.videoWidth, vh = video.elt.videoHeight;
-    if (!vw) return;   // カメラの準備待ち（0 で割ると Infinity になってしまう）
+    const videoW = video.elt.videoWidth, videoH = video.elt.videoHeight;
+    if (!videoW) return;   // カメラの準備待ち（0 で割ると Infinity になってしまう）
 
     // ■ 座標系を映像に合わせる
     //   ml5.js がくれる座標は「映像のピクセル」（例：1280×720）。
     //   一方キャンバスはウィンドウの大きさ。そのまま描くと位置がずれる。
     //   そこで原点と倍率を変えて、以降は映像の座標のまま描けるようにする。
     //   拡大率に max を使うと、縦横比を保ったままウィンドウを隙間なく覆える（はみ出た部分は切れる）
-    const s = max(width / vw, height / vh);
-    push();                                                    // 今の座標系を保存
-    translate((width - vw * s) / 2, (height - vh * s) / 2);    // 中央に寄せる
-    scale(s);                                                  // 以降の描画をすべて s 倍
-    image(video, 0, 0, vw, vh);                                // カメラ映像
+    const zoom = max(width / videoW, height / videoH);
+    push();                                                                  // 今の座標系を保存
+    translate((width - videoW * zoom) / 2, (height - videoH * zoom) / 2);    // 中央に寄せる
+    scale(zoom);                                                             // 以降の描画をすべて zoom 倍
+    image(video, 0, 0, videoW, videoH);                                      // カメラ映像
 
     // --- 陣地の境界線 ---
     stroke(255, 100);   // 白・透明度100（0〜255）
@@ -333,75 +333,77 @@ function draw() {
     // p5.js に点線の機能は無いので、Canvas 2D API を直接呼ぶ。
     // drawingContext は p5.js が内部で使っているコンテキストそのもの
     drawingContext.setLineDash([10, 10]);
-    line(vw / 2, 0, vw / 2, vh);
+    line(videoW / 2, 0, videoW / 2, videoH);
     drawingContext.setLineDash([]);   // 元に戻す（以降の線が点線になるのを防ぐ）
 
     // --- 手の骨格（構え中は黄色） ---
-    for (const { h, side } of hands) {
+    for (const { hand, side } of hands) {
         const armed = players[side].armed;
         stroke(armed ? '#FFD600' : COLORS[side]);
         strokeWeight(3);
         // getConnections() は、繋ぐべき点の組（[[0,1], [1,2], ...]）をくれる
         for (const [from, to] of handPose.getConnections()) {
-            line(h.keypoints[from].x, h.keypoints[from].y, h.keypoints[to].x, h.keypoints[to].y);
+            line(hand.keypoints[from].x, hand.keypoints[from].y, hand.keypoints[to].x, hand.keypoints[to].y);
         }
         noStroke();
         fill(COLORS[side]);
-        for (const k of h.keypoints) circle(k.x, k.y, 6);   // 関節の点
-        if (armed) label('構え', h.wrist.x, h.wrist.y + 40, '#FFD600');
+        for (const kp of hand.keypoints) circle(kp.x, kp.y, 6);   // 関節の点
+        if (armed) label('構え', hand.wrist.x, hand.wrist.y + 40, '#FFD600');
     }
 
     // --- 弾（尾を引いて飛び、相手の手に当たるか画面外に出たら消える） ---
-    for (const b of bullets) {
+    for (const bullet of bullets) {
         // 「速度 × 経過時間」で動かす。deltaTime は前のフレームからの経過時間（ms）。
         // 1フレームあたり何ピクセル、にすると、PCの速さで弾の速度が変わってしまう
-        b.pos.add(p5.Vector.mult(b.vel, deltaTime / 1000));
+        bullet.position.add(p5.Vector.mult(bullet.velocity, deltaTime / 1000));
 
         // 相手の手に当たったか（自分の手はそもそも探す対象に入れない）
-        const target = !winner && hands.find(v => v.side !== b.owner && inHand(v.h, b.pos));
+        const target = !winner && hands.find(seen => seen.side !== bullet.owner && inHand(seen.hand, bullet.position));
         if (target) {
-            damage(target.side, b.pos);
-            b.dead = true;     // ここでは印を付けるだけ
+            damage(target.side, bullet.position);
+            bullet.dead = true;     // ここでは印を付けるだけ
             continue;
         }
         // 画面の外に出た
-        if (b.pos.x < -50 || b.pos.y < -50 || b.pos.x > vw + 50 || b.pos.y > vh + 50) {
-            b.dead = true;
+        const { x, y } = bullet.position;
+        if (x < -50 || y < -50 || x > videoW + 50 || y > videoH + 50) {
+            bullet.dead = true;
             continue;
         }
 
         // 弾の尾（0.05秒前にいた位置まで線を引く）と、弾本体
-        stroke(COLORS[b.owner]);
+        stroke(COLORS[bullet.owner]);
         strokeWeight(4);
-        line(b.pos.x, b.pos.y, b.pos.x - b.vel.x * 0.05, b.pos.y - b.vel.y * 0.05);
+        line(x, y, x - bullet.velocity.x * 0.05, y - bullet.velocity.y * 0.05);
         noStroke();
         fill('#FFF3B0');
-        circle(b.pos.x, b.pos.y, 12);
+        circle(x, y, 12);
     }
     // 消える弾は、ループの中ではなく後からまとめて取り除く。
     // ループ中に配列から直接消すと、次の要素を読み飛ばしてしまうため
-    bullets = bullets.filter(b => !b.dead);
+    bullets = bullets.filter(bullet => !bullet.dead);
 
     // --- エフェクト（銃口の光は150ms、被弾は400msで消える） ---
-    for (const e of effects) {
-        // k は進み具合。0（作られた瞬間）から 1（消える瞬間）へ増える。
+    for (const effect of effects) {
+        // progress は進み具合。0（作られた瞬間）から 1（消える瞬間）へ増える。
         // これを大きさや透明度に掛けると、時間に沿ったアニメーションになる
-        const k = (millis() - e.t) / (e.type === 'flash' ? 150 : 400);
-        if (k >= 1) { e.dead = true; continue; }
+        const progress = (millis() - effect.startTime) / (effect.type === 'flash' ? 150 : 400);
+        if (progress >= 1) { effect.dead = true; continue; }
         noStroke();
-        if (e.type === 'flash') {
+        const { x, y } = effect.position;
+        if (effect.type === 'flash') {
             // 外側のオレンジと内側の白、2枚の円を重ねて炎のように見せる
-            fill(255, 150, 0, 200 * (1 - k));       // 4つめの数値は透明度（時間とともに薄く）
-            circle(e.pos.x, e.pos.y, 100 * (1 + k));   // 時間とともに大きく
-            fill(255, 255, 220, 255 * (1 - k));
-            circle(e.pos.x, e.pos.y, 40 * (1 + k));
+            fill(255, 150, 0, 200 * (1 - progress));   // 4つめの数値は透明度（時間とともに薄く）
+            circle(x, y, 100 * (1 + progress));        // 時間とともに大きく
+            fill(255, 255, 220, 255 * (1 - progress));
+            circle(x, y, 40 * (1 + progress));
         } else {
-            fill(255, 40, 40, 150 * (1 - k));
-            circle(e.pos.x, e.pos.y, 40 + 120 * k);
-            label(`-${DAMAGE}`, e.pos.x, e.pos.y - 30 - 40 * k, '#FF4040');   // 上に浮かぶ数字
+            fill(255, 40, 40, 150 * (1 - progress));
+            circle(x, y, 40 + 120 * progress);
+            label(`-${DAMAGE}`, x, y - 30 - 40 * progress, '#FF4040');   // 上に浮かぶ数字
         }
     }
-    effects = effects.filter(e => !e.dead);
+    effects = effects.filter(effect => !effect.dead);
 
     pop();      // 座標系を元（キャンバスの座標）に戻す
 
@@ -411,30 +413,30 @@ function draw() {
 // HPバー・勝敗・状態表示。
 // pop() の後なので、ここでは映像ではなくキャンバスの座標で描く
 function drawHud() {
-    const w = (width - 64) / 2;   // バー1本の幅（左右の余白16 × 2 と中央の間隔32 を引いて半分）
+    const barWidth = (width - 64) / 2;   // バー1本の幅（左右の余白16 × 2 と中央の間隔32 を引いて半分）
 
-    players.forEach((pl, i) => {
-        const x = 16 + i * (w + 32);
+    players.forEach((player, side) => {
+        const barX = 16 + side * (barWidth + 32);
 
         // プレイヤー名と HP の数値。P2 は右揃えにして、左右対称に見せる
         textSize(24);
-        textAlign(i ? RIGHT : LEFT, TOP);
+        textAlign(side ? RIGHT : LEFT, TOP);
         stroke(0);
         strokeWeight(3);
         fill(255);
-        text(i ? `HP ${pl.hp} P2` : `P1 HP ${pl.hp}`, i ? x + w : x, 16);
+        text(side ? `HP ${player.hp} P2` : `P1 HP ${player.hp}`, side ? barX + barWidth : barX, 16);
 
         // バーの枠（最後の数値は角の丸み）
         stroke(255);
         strokeWeight(2);
         fill(0, 128);
-        rect(x, 48, w, 24, 4);
+        rect(barX, 48, barWidth, 24, 4);
 
         // 残りの HP。P2 のバーは右端から減るように、描き始めの x をずらす
         noStroke();
-        fill(COLORS[i]);
-        const bw = w * pl.hp / MAX_HP;
-        rect(i ? x + w - bw : x, 48, bw, 24, 4);
+        fill(COLORS[side]);
+        const hpWidth = barWidth * player.hp / MAX_HP;
+        rect(side ? barX + barWidth - hpWidth : barX, 48, hpWidth, 24, 4);
     });
 
     // 検出できている手の数（動作の確認用）
